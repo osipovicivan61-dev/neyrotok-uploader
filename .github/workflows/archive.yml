@@ -43,7 +43,7 @@ jobs:
               sys.exit('bad kind')
           if not re.fullmatch(r'[\w.\-]+/[\w.\-]+', repo):
               sys.exit('bad repo')
-          if not url.startswith('https://'):
+          if not (url.startswith('https://') or (auth == 'saranc' and url.startswith('http://'))):
               sys.exit('bad address')
 
           src_headers = {'User-Agent': 'neyrotok-uploader'}
