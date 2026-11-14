@@ -2,7 +2,7 @@
 # The NeyroTok server sends a repository_dispatch (event "archive") with the file name and the generator's address;
 # this job downloads the file from the generator and puts it into the archive, so the video never passes through
 # the NeyroTok server (whose hosting plan has little traffic). Public repository: GitHub Actions minutes are free.
-# Secrets: ARCHIVE_TOKEN (contents read/write on the archive), GROK_IMG_KEY and VEO_API_KEY (for those providers).
+# Secrets: ARCHIVE_TOKEN (contents read/write on the archive), GROK_IMG_KEY, VEO_API_KEY and SARANC_API_KEY (for those providers).
 # Nothing secret and no address is printed to the log.
 name: archive
 on:
@@ -26,6 +26,7 @@ jobs:
           ARCHIVE_TOKEN: ${{ secrets.ARCHIVE_TOKEN }}
           GROK_IMG_KEY: ${{ secrets.GROK_IMG_KEY }}
           VEO_API_KEY: ${{ secrets.VEO_API_KEY }}
+          SARANC_API_KEY: ${{ secrets.SARANC_API_KEY }}
         run: |
           python3 - <<'PY'
           import base64, json, os, re, sys, time, urllib.error, urllib.request
@@ -50,6 +51,8 @@ jobs:
               src_headers['Authorization'] = 'Bearer ' + os.environ.get('GROK_IMG_KEY', '')
           elif auth == 'veo':
               src_headers['Authorization'] = 'Bearer ' + os.environ.get('VEO_API_KEY', '')
+          elif auth == 'saranc' and os.environ.get('SARANC_API_KEY', ''):
+              src_headers['Authorization'] = 'Bearer ' + os.environ.get('SARANC_API_KEY', '')
 
           LIMIT = 95 * 1024 * 1024
           data = None
