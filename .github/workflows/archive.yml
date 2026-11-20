@@ -1,9 +1,9 @@
 # NeyroTok uploader: stores a generated video in the private archive repository.
 # The NeyroTok server sends a repository_dispatch (event "archive") with the file name and the generator's address;
 # this job downloads the file from the generator and puts it into the archive, so the video never passes through
-# the NeyroTok server (whose hosting plan has little traffic). Public repository: GitHub Actions minutes are free.
+# the NeyroTok server (whose hosting plan has little traffic).
 # Secrets: ARCHIVE_TOKEN (contents read/write on the archive), GROK_IMG_KEY, VEO_API_KEY, SARANC_API_KEY, VIDGEN_API_KEY and AIVID_API_KEY (for those providers).
-# Nothing secret and no address is printed to the log.
+# Nothing secret, no address and no prompt is printed to the log (the request is read from the event file).
 name: archive
 # the file name in the run's title lets the NeyroTok server see at once that this file's upload failed
 run-name: archive ${{ github.event.client_payload.name }}
@@ -17,14 +17,8 @@ jobs:
     timeout-minutes: 12
     steps:
       - name: Store the file in the archive
+        # the request's details are read from the event file, not passed as env: env values are shown in the log
         env:
-          SRC_URL: ${{ github.event.client_payload.url }}
-          AUTH: ${{ github.event.client_payload.auth }}
-          NAME: ${{ github.event.client_payload.name }}
-          KIND: ${{ github.event.client_payload.kind }}
-          META: ${{ github.event.client_payload.meta }}
-          ARCHIVE_REPO: ${{ github.event.client_payload.repo }}
-          BRANCH: ${{ github.event.client_payload.branch }}
           ARCHIVE_TOKEN: ${{ secrets.ARCHIVE_TOKEN }}
           GROK_IMG_KEY: ${{ secrets.GROK_IMG_KEY }}
           VEO_API_KEY: ${{ secrets.VEO_API_KEY }}
@@ -35,12 +29,15 @@ jobs:
           python3 - <<'PY'
           import base64, json, os, re, sys, time, urllib.error, urllib.request
 
-          name = os.environ.get('NAME', '')
-          kind = os.environ.get('KIND', '')
-          url = os.environ.get('SRC_URL', '')
-          auth = os.environ.get('AUTH', '')
-          repo = os.environ.get('ARCHIVE_REPO', '')
-          branch = os.environ.get('BRANCH') or 'main'
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as f:
+              payload = (json.load(f) or {}).get('client_payload') or {}
+          name = str(payload.get('name') or '')
+          kind = str(payload.get('kind') or '')
+          url = str(payload.get('url') or '')
+          auth = str(payload.get('auth') or '')
+          repo = str(payload.get('repo') or '')
+          branch = str(payload.get('branch') or '') or 'main'
+          meta_raw = payload.get('meta') or '{}'
           if not re.fullmatch(r'[A-Za-z0-9_.\-]{5,200}\.(mp4|png|jpe?g|webp)', name):
               sys.exit('bad name')
           if kind not in ('videos', 'photos'):
@@ -117,7 +114,7 @@ jobs:
           if not put(f'{kind}/{name}', data, f'archive {kind[:-1]} {name}'):
               sys.exit('could not store the file')
           try:
-              meta = json.loads(os.environ.get('META') or '{}')
+              meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
               if not isinstance(meta, dict):
                   meta = {}
           except Exception:
