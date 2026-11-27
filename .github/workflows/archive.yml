@@ -3,6 +3,7 @@
 # this job downloads the file from the generator and puts it into the archive, so the video never passes through
 # the NeyroTok server (whose hosting plan has little traffic).
 # Secrets: ARCHIVE_TOKEN (contents read/write on the archive), GROK_IMG_KEY, VEO_API_KEY, SARANC_API_KEY, VIDGEN_API_KEY, AIVID_API_KEY and VIVAGEN_API_KEY (for those providers).
+# Discord bot videos also get a copy with the NeyroTok watermark (videos/<name>__wm.mp4, script in wm/).
 # Nothing secret, no address and no prompt is printed to the log (the request is read from the event file).
 name: archive
 # the file name in the run's title lets the NeyroTok server see at once that this file's upload failed
@@ -15,7 +16,21 @@ jobs:
   upload:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # reading this public repository's own files (the watermark script, wm/)
+    permissions:
+      contents: read
     steps:
+      # Discord bot videos (payload "wm": nick and format): the watermarked copy is made here, in seconds;
+      # the bot's own server needed about 4 minutes for it
+      - name: Get the watermark script
+        if: ${{ github.event.client_payload.wm }}
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: wm
+          persist-credentials: false
+      - name: Install the watermark script
+        if: ${{ github.event.client_payload.wm }}
+        run: npm ci --prefix wm --no-audit --no-fund --silent
       - name: Store the file in the archive
         # the request's details are read from the event file, not passed as env: env values are shown in the log
         env:
@@ -206,6 +221,28 @@ jobs:
                   print(f'store try {attempt}: HTTP {st}')
                   time.sleep(3 * attempt)
               return False
+
+          # the watermarked copy for the Discord bot goes first: when the original appears, the copy is already there
+          # (or it could not be made, and the bot puts the mark on itself)
+          wm = payload.get('wm') if isinstance(payload.get('wm'), dict) else None
+          if wm and kind == 'videos' and name.endswith('.mp4') and os.path.isfile('wm/mark.mjs'):
+              import subprocess, tempfile
+              nick = re.sub(r'[^A-Za-z0-9_.\-]', '', str(wm.get('nick') or ''))[:40] or 'neyrotok'
+              aspect = '16:9' if str(wm.get('aspect') or '') == '16:9' else '9:16'
+              try:
+                  with tempfile.TemporaryDirectory() as tmp:
+                      src = os.path.join(tmp, 'in.mp4')
+                      dst = os.path.join(tmp, 'out.mp4')
+                      with open(src, 'wb') as f:
+                          f.write(data)
+                      subprocess.run(['node', 'wm/mark.mjs', src, dst, nick, aspect], check=True, timeout=300)
+                      with open(dst, 'rb') as f:
+                          marked = f.read()
+                  if len(marked) > 1000:
+                      wm_name = name[:-4] + '__wm.mp4'
+                      print('watermarked copy stored' if put(f'videos/{wm_name}', marked, f'archive watermark {wm_name}') else 'watermarked copy not stored')
+              except Exception as e:
+                  print(f'no watermarked copy: {type(e).__name__}')
 
           if not put(f'{kind}/{name}', data, f'archive {kind[:-1]} {name}'):
               sys.exit('could not store the file')
