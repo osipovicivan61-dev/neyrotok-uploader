@@ -1,5 +1,5 @@
 // The NeyroTok watermark for Discord bot videos, put on in the archive run (4 CPUs here, the bot's server has 0.15).
-// A copy of neyrotok/discord-bot/watermark.js with the system ffmpeg; keep the two the same.
+// A copy of neyrotok/discord-bot/watermark.js (ffmpeg from ffmpeg-static); keep the two the same.
 // Usage: node mark.mjs <in.mp4> <out.mp4> <nick> <9:16|16:9>
 // The NeyroTok watermark on bot videos: "NeyroTok" and "@nick", the same mark as on the site's downloads
 // (server.ts renderWatermarked, VideoWatermark.tsx): it moves between the corners TR, BL, TL, BR, 4.2 s in each,
@@ -14,7 +14,8 @@ import { Resvg } from '@resvg/resvg-js';
 
 const FONT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fonts');
 const FONT_FILES = ['Outfit-ExtraBold.ttf', 'JetBrainsMono-Bold.ttf'].map((f) => path.join(FONT_DIR, f)).filter((f) => fs.existsSync(f));
-const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+// GitHub's runners no longer have ffmpeg: the static build from npm (ffmpeg-static)
+const FFMPEG = process.env.FFMPEG_PATH || (await import('ffmpeg-static').then((m) => m.default).catch(() => null)) || 'ffmpeg';
 
 /** Size, length and bitrate of a video, from ffmpeg's own report (ffmpeg-static has no ffprobe) */
 const probe = (file) =>
