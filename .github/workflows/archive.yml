@@ -2,7 +2,7 @@
 # The NeyroTok server sends a repository_dispatch (event "archive") with the file name and the generator's address;
 # this job downloads the file from the generator and puts it into the archive, so the video never passes through
 # the NeyroTok server (whose hosting plan has little traffic).
-# Secrets: ARCHIVE_TOKEN (contents read/write on the archive), GROK_IMG_KEY, VEO_API_KEY, SARANC_API_KEY, VIDGEN_API_KEY and AIVID_API_KEY (for those providers).
+# Secrets: ARCHIVE_TOKEN (contents read/write on the archive), GROK_IMG_KEY, VEO_API_KEY, SARANC_API_KEY, VIDGEN_API_KEY, AIVID_API_KEY and VIVAGEN_API_KEY (for those providers).
 # Nothing secret, no address and no prompt is printed to the log (the request is read from the event file).
 name: archive
 # the file name in the run's title lets the NeyroTok server see at once that this file's upload failed
@@ -25,6 +25,7 @@ jobs:
           SARANC_API_KEY: ${{ secrets.SARANC_API_KEY }}
           VIDGEN_API_KEY: ${{ secrets.VIDGEN_API_KEY }}
           AIVID_API_KEY: ${{ secrets.AIVID_API_KEY }}
+          VIVAGEN_API_KEY: ${{ secrets.VIVAGEN_API_KEY }}
         run: |
           python3 - <<'PY'
           import base64, json, os, re, sys, time, urllib.error, urllib.request
@@ -65,6 +66,8 @@ jobs:
               src_headers['X-Api-Key'] = os.environ.get('VIDGEN_API_KEY', '').strip()
           elif auth == 'aivid' and os.environ.get('AIVID_API_KEY', '').strip():
               src_headers['X-API-Key'] = os.environ.get('AIVID_API_KEY', '').strip()
+          elif auth == 'viva' and os.environ.get('VIVAGEN_API_KEY', '').strip():
+              src_headers['X-API-Key'] = os.environ.get('VIVAGEN_API_KEY', '').strip()
 
           # a 16-second video: the second part (same generator, same key), joined to the first one below
           join = str(payload.get('join') or '')
