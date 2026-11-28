@@ -3,7 +3,8 @@
 // Usage: node mark.mjs <in.mp4> <out.mp4> <nick> <9:16|16:9>
 // The NeyroTok watermark on bot videos: "NeyroTok" and "@nick", the same mark as on the site's downloads
 // (server.ts renderWatermarked, VideoWatermark.tsx): it moves between the corners TR, BL, TL, BR, 4.2 s in each,
-// with 0.45 s fades. Made here, on the bot's own server, so the NeyroTok server spends nothing on it.
+// with 0.45 s fades. A second "NeyroTok" stands still in the middle of the left edge (server.ts wmMiddleMark),
+// so cutting the top or the bottom off does not remove the mark. Made here, on the bot's own server, so the NeyroTok server spends nothing on it.
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -47,6 +48,7 @@ export async function watermarkVideo(input, user, aspectHint = '9:16', onProgres
   const outPath = path.join(tmp, `nt_out_${id}.mp4`);
   const rightPath = path.join(tmp, `nt_wr_${id}.png`);
   const leftPath = path.join(tmp, `nt_wl_${id}.png`);
+  const midPath = path.join(tmp, `nt_wmid_${id}.png`);
   try {
     fs.writeFileSync(inPath, input);
     const p = await probe(inPath);
@@ -88,6 +90,24 @@ export async function watermarkVideo(input, user, aspectHint = '9:16', onProgres
     const fontOpts = { font: { fontFiles: FONT_FILES, loadSystemFonts: FONT_FILES.length === 0, defaultFontFamily: 'Outfit' } };
     fs.writeFileSync(rightPath, new Resvg(svg(true), fontOpts).render().asPng());
     fs.writeFileSync(leftPath, new Resvg(svg(false), fontOpts).render().asPng());
+    // the still mark in the middle of the left edge (the right edge is under TikTok's and Reels' buttons)
+    const mSize = 15 * k;
+    const mW = Math.ceil(mSize * 5.2) + pad * 2;
+    const mH = Math.ceil(mSize * 1.35) + pad * 2;
+    const midSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${mW}" height="${mH}" viewBox="0 0 ${mW} ${mH}">
+  <defs>
+    <linearGradient id="mg" gradientUnits="userSpaceOnUse" x1="${pad}" y1="${pad}" x2="${mW - pad}" y2="${mH - pad}">
+      <stop offset="0%" stop-color="#FFFFFF"/><stop offset="50%" stop-color="#D4D4D8"/><stop offset="100%" stop-color="#9CA3AF"/>
+    </linearGradient>
+    <filter id="ms" x="-25%" y="-35%" width="150%" height="170%">
+      <feDropShadow dx="0" dy="${(1 * k).toFixed(2)}" stdDeviation="${(2 * k).toFixed(2)}" flood-color="#000000" flood-opacity="0.8"/>
+    </filter>
+  </defs>
+  <text x="${pad}" y="${(pad + mSize * 1.02).toFixed(2)}" opacity="0.72" font-family="Outfit" font-weight="800" font-size="${mSize.toFixed(2)}" letter-spacing="${(-0.02 * mSize).toFixed(2)}" fill="url(#mg)" filter="url(#ms)">NeyroTok</text>
+</svg>`;
+    fs.writeFileSync(midPath, new Resvg(midSvg, fontOpts).render().asPng());
+    const midX = Math.max(0, Math.round(geo.sideLeft * k + inset) - pad);
+    const midY = Math.max(0, Math.round(H / 2 - mH / 2));
 
     const px = (v) => Math.round(v * k);
     const corners = [
@@ -120,7 +140,8 @@ export async function watermarkVideo(input, user, aspectHint = '9:16', onProgres
       parts.push(`[${prev}][w${i}]overlay=x=${Math.max(0, g.c.x)}:y=${Math.max(0, g.c.y)}:enable='between(t,${g.start.toFixed(2)},${g.end.toFixed(2)})'[o${i}]`);
       prev = `o${i}`;
     });
-    parts.push(`[${prev}]format=yuv420p[vout]`);
+    parts.push(`[3:v]format=rgba[mid]`);
+    parts.push(`[${prev}][mid]overlay=x=${midX}:y=${midY}:shortest=1,format=yuv420p[vout]`);
     // about the source's own bitrate, so the file stays as light as the original (Discord takes up to 10 MB)
     const kbps = p.kbps > 300 ? Math.round(p.kbps * 1.15) : 0;
     const args = [
@@ -128,6 +149,7 @@ export async function watermarkVideo(input, user, aspectHint = '9:16', onProgres
       '-i', inPath,
       '-loop', '1', '-framerate', '30', '-i', rightPath,
       '-loop', '1', '-framerate', '30', '-i', leftPath,
+      '-loop', '1', '-framerate', '30', '-i', midPath,
       '-filter_complex', parts.join(';'),
       '-map', '[vout]', '-map', '0:a?',
       '-t', duration.toFixed(3),
@@ -158,7 +180,7 @@ export async function watermarkVideo(input, user, aspectHint = '9:16', onProgres
     if (out.length < 1000) throw new Error('empty result');
     return out;
   } finally {
-    for (const f of [inPath, outPath, rightPath, leftPath]) fs.rm(f, { force: true }, () => undefined);
+    for (const f of [inPath, outPath, rightPath, leftPath, midPath]) fs.rm(f, { force: true }, () => undefined);
   }
 }
 
