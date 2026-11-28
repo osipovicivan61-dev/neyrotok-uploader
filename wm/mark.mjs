@@ -1,22 +1,33 @@
 // The NeyroTok watermark for Discord bot videos, put on in the archive run (4 CPUs here, the bot's server has 0.15).
 // A copy of neyrotok/discord-bot/watermark.js (ffmpeg from ffmpeg-static); keep the two the same.
 // Usage: node mark.mjs <in.mp4> <out.mp4> <nick> <9:16|16:9>
-// The NeyroTok watermark on bot videos: "NeyroTok" and "@nick", the same mark as on the site's downloads
-// (server.ts renderWatermarked, VideoWatermark.tsx): it moves between six places, 4.2 s in each,
-// with 0.45 s fades: top right, middle left, bottom right, top left, middle right, bottom left (the middle stops keep
-// the mark when the top or the bottom is cut off). Made here, on the bot's own server, so the NeyroTok server spends nothing on it.
+// The NeyroTok watermark on bot videos: "NeyroTok" and "@nick" with the same motion as on the site
+// (src/utils/watermarkAnim.ts, generated here as watermarkAnim.js): the mark grows in with a smear, the nick slides
+// out, then it whooshes away and comes back at the next place: top right, middle left, bottom right, top left,
+// middle right, bottom left, 4.2 s each. The frames of one cycle are drawn by the site's own drawing code
+// (the same as the browser download, src/utils/videoWatermark.ts) and laid over the video with ffmpeg.
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { Resvg } from '@resvg/resvg-js';
+import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
+import { WM_CYCLE, WM_STOPS, MARK_ROOM, drawMarkAt, markLines, markState, measureMark } from './watermarkAnim.js';
 
 const FONT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fonts');
-const FONT_FILES = ['Outfit-ExtraBold.ttf', 'JetBrainsMono-Bold.ttf'].map((f) => path.join(FONT_DIR, f)).filter((f) => fs.existsSync(f));
+const FONTS = [
+  ['Outfit-ExtraBold.ttf', 'Outfit'],
+  ['JetBrainsMono-Bold.ttf', 'JetBrains Mono'],
+];
+let fontsReady = 0;
+for (const [file, family] of FONTS) {
+  const p = path.join(FONT_DIR, file);
+  if (fs.existsSync(p) && GlobalFonts.registerFromPath(p, family)) fontsReady++;
+}
 // GitHub's runners no longer have ffmpeg: the static build from npm (ffmpeg-static)
 const FFMPEG = process.env.FFMPEG_PATH || (await import('ffmpeg-static').then((m) => m.default).catch(() => null)) || 'ffmpeg';
+
+const MARK_FPS = 30;
 
 /** Size, length and bitrate of a video, from ffmpeg's own report (ffmpeg-static has no ffprobe) */
 const probe = (file) =>
@@ -26,28 +37,51 @@ const probe = (file) =>
       const size = /Video:.*?\b(\d{2,5})x(\d{2,5})\b/.exec(text);
       const dur = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(text);
       const rate = /bitrate:\s*(\d+)\s*kb\/s/.exec(text);
+      let width = size ? Number(size[1]) : 0;
+      let height = size ? Number(size[2]) : 0;
+      if (/rotate\s*:\s*-?(90|270)|rotation of -?(90|270)/i.test(text)) [width, height] = [height, width];
       resolve({
-        width: size ? Number(size[1]) : 0,
-        height: size ? Number(size[2]) : 0,
+        width,
+        height,
         duration: dur ? Number(dur[1]) * 3600 + Number(dur[2]) * 60 + Number(dur[3]) : 0,
         kbps: rate ? Number(rate[1]) : 0,
       });
     });
   });
 
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+/** One cycle of the moving mark as PNG files (30 a second), drawn by the site's code; equal frames drawn once */
+const writeMarkFrames = (lay, right, dir, prefix) => {
+  const w = Math.ceil(lay.width * (1 + MARK_ROOM.left + MARK_ROOM.right));
+  const h = Math.ceil(lay.height * (1 + MARK_ROOM.y * 2));
+  const canvas = createCanvas(w, h);
+  const ctx = canvas.getContext('2d');
+  const ox = lay.width * MARK_ROOM.left;
+  const oy = lay.height * MARK_ROOM.y;
+  const cache = new Map();
+  const count = Math.round(WM_CYCLE * MARK_FPS);
+  for (let i = 0; i < count; i++) {
+    const tc = i / MARK_FPS;
+    const st = markState(tc, lay.lines.length);
+    const key = st ? JSON.stringify(st, (_k, v) => (typeof v === 'number' ? Math.round(v * 1000) : v)) : 'none';
+    let png = cache.get(key);
+    if (!png) {
+      ctx.clearRect(0, 0, w, h);
+      drawMarkAt(ctx, lay, ox, oy, right, tc, null);
+      png = canvas.toBuffer('image/png');
+      cache.set(key, png);
+    }
+    fs.writeFileSync(path.join(dir, `${prefix}_${String(i).padStart(4, '0')}.png`), png);
+  }
+};
 
 /**
  * Puts the mark on a video. input: the mp4 as a Buffer; user: the nick without "@"; onProgress(0..1).
  * Returns the new mp4 as a Buffer.
  */
 export async function watermarkVideo(input, user, aspectHint = '9:16', onProgress = () => {}) {
-  const id = crypto.randomUUID();
-  const tmp = os.tmpdir();
-  const inPath = path.join(tmp, `nt_in_${id}.mp4`);
-  const outPath = path.join(tmp, `nt_out_${id}.mp4`);
-  const rightPath = path.join(tmp, `nt_wr_${id}.png`);
-  const leftPath = path.join(tmp, `nt_wl_${id}.png`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt_wm_'));
+  const inPath = path.join(dir, 'in.mp4');
+  const outPath = path.join(dir, 'out.mp4');
   try {
     fs.writeFileSync(inPath, input);
     const p = await probe(inPath);
@@ -55,84 +89,40 @@ export async function watermarkVideo(input, user, aspectHint = '9:16', onProgres
     const H = p.height || (aspectHint === '16:9' ? 720 : 1280);
     const duration = p.duration > 0.5 ? p.duration : 8;
     const landscape = W > H;
-    // the feed's geometry in CSS pixels, the same numbers as on the site
+    // the same numbers as videoWatermark.ts (browser download) and VideoWatermark.tsx (the feed)
     const geo = landscape
-      ? { refWidth: 366, boxW: 145, boxH: 36, brandSize: 15, brandY: 16, handleSize: 10.5, handleY: 29, top: 12, bottom: 12, sideLeft: 14, sideRightTop: 14, sideRightBottom: 14 }
-      : { refWidth: 390, boxW: 175, boxH: 44, brandSize: 18, brandY: 19, handleSize: 12, handleY: 36, top: 14, bottom: 100, sideLeft: 16, sideRightTop: 16, sideRightBottom: 64 };
+      ? { refWidth: 366, boxH: 36, top: 12, bottom: 12, sideLeft: 14, sideRightTop: 14, sideRightBottom: 14 }
+      : { refWidth: 390, boxH: 44, top: 14, bottom: 100, sideLeft: 16, sideRightTop: 16, sideRightBottom: 64 };
     const k = Math.max(0.5, W / geo.refWidth);
-    const pad = Math.round(6 * k);
-    const boxW = Math.round(geo.boxW * k) + pad * 2;
-    const boxH = Math.round(geo.boxH * k) + pad * 2;
-    const inset = 3 * k;
-    const nick = esc(String(user || 'neyrotok').replace(/^@+/, '').slice(0, 40));
-    const svg = (right) => {
-      const x = right ? boxW - pad - inset : pad + inset;
-      const anchor = right ? 'end' : 'start';
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="${boxW}" height="${boxH}" viewBox="0 0 ${boxW} ${boxH}">
-  <defs>
-    <linearGradient id="bg" gradientUnits="userSpaceOnUse" x1="${pad}" y1="${pad}" x2="${boxW - pad}" y2="${boxH - pad}">
-      <stop offset="0%" stop-color="#FFFFFF"/><stop offset="50%" stop-color="#D4D4D8"/><stop offset="100%" stop-color="#9CA3AF"/>
-    </linearGradient>
-    <linearGradient id="hg" gradientUnits="userSpaceOnUse" x1="${pad}" y1="0" x2="${boxW - pad}" y2="0">
-      <stop offset="0%" stop-color="#FFFFFF"/><stop offset="50%" stop-color="#CBD5E1"/><stop offset="100%" stop-color="#94A3B8"/>
-    </linearGradient>
-    <filter id="ds" x="-25%" y="-25%" width="150%" height="150%">
-      <feDropShadow dx="0" dy="${(1 * k).toFixed(2)}" stdDeviation="${(2 * k).toFixed(2)}" flood-color="#000000" flood-opacity="0.82"/>
-    </filter>
-  </defs>
-  <g opacity="0.88">
-    <text x="${x.toFixed(2)}" y="${(pad + geo.brandY * k).toFixed(2)}" text-anchor="${anchor}" font-family="Outfit" font-weight="800" font-size="${(geo.brandSize * k).toFixed(2)}" letter-spacing="${(-0.02 * geo.brandSize * k).toFixed(2)}" fill="url(#bg)" filter="url(#ds)">NeyroTok</text>
-    <text x="${x.toFixed(2)}" y="${(pad + geo.handleY * k).toFixed(2)}" text-anchor="${anchor}" font-family="JetBrains Mono" font-weight="700" font-size="${(geo.handleSize * k).toFixed(2)}" fill="url(#hg)" filter="url(#ds)">@${nick}</text>
-  </g>
-</svg>`;
-    };
-    const fontOpts = { font: { fontFiles: FONT_FILES, loadSystemFonts: FONT_FILES.length === 0, defaultFontFamily: 'Outfit' } };
-    fs.writeFileSync(rightPath, new Resvg(svg(true), fontOpts).render().asPng());
-    fs.writeFileSync(leftPath, new Resvg(svg(false), fontOpts).render().asPng());
+    const nick = String(user || 'neyrotok').replace(/^@+/, '').replace(/[^a-zA-Z0-9_.\-]/g, '').slice(0, 40) || 'neyrotok';
+    const lines = markLines(nick, landscape ? 'contained' : 'fullscreen', '', k);
+    const lay = measureMark(createCanvas(8, 8).getContext('2d'), lines, k);
+    writeMarkFrames(lay, true, dir, 'r');
+    writeMarkFrames(lay, false, dir, 'l');
 
+    // the places, as in the feed: 0 top right, 1 middle left, 2 bottom right, 3 top left, 4 middle right, 5 bottom left
     const px = (v) => Math.round(v * k);
-    const yMid = Math.round(H / 2 - boxH / 2);
-    const corners = [
-      { right: true, x: W - px(geo.sideRightTop) - (boxW - pad), y: px(geo.top) - pad },
-      { right: false, x: px(geo.sideLeft) - pad, y: yMid },
-      { right: true, x: W - px(geo.sideRightBottom) - (boxW - pad), y: H - px(geo.bottom) - (boxH - pad) },
-      { right: false, x: px(geo.sideLeft) - pad, y: px(geo.top) - pad },
-      { right: true, x: W - px(geo.sideRightTop) - (boxW - pad), y: yMid },
-      { right: false, x: px(geo.sideLeft) - pad, y: H - px(geo.bottom) - (boxH - pad) },
-    ];
-    const CYCLE = 4.2;
-    const FADE = 0.45;
-    const GAP = 0.65;
-    const segs = [];
-    for (let s = 0; ; s++) {
-      const start = s === 0 ? 0 : s * CYCLE + GAP;
-      if (start >= duration) break;
-      const fadeOut = (s + 1) * CYCLE;
-      segs.push({ start, fadeOut, end: Math.min(duration, fadeOut + FADE), c: corners[s % corners.length] });
-    }
-    const parts = [];
-    const rightSegs = segs.filter((g) => g.c.right);
-    const leftSegs = segs.filter((g) => !g.c.right);
-    if (rightSegs.length) parts.push(`[1:v]format=rgba,split=${rightSegs.length}${rightSegs.map((_, i) => `[r${i}]`).join('')}`);
-    if (leftSegs.length) parts.push(`[2:v]format=rgba,split=${leftSegs.length}${leftSegs.map((_, i) => `[l${i}]`).join('')}`);
-    let prev = '0:v';
-    let ri = 0;
-    let li = 0;
-    segs.forEach((g, i) => {
-      const src = g.c.right ? `r${ri++}` : `l${li++}`;
-      parts.push(`[${src}]fade=t=in:st=${g.start.toFixed(2)}:d=${FADE}:alpha=1,fade=t=out:st=${g.fadeOut.toFixed(2)}:d=${FADE}:alpha=1[w${i}]`);
-      parts.push(`[${prev}][w${i}]overlay=x=${Math.max(0, g.c.x)}:y=${Math.max(0, g.c.y)}:enable='between(t,${g.start.toFixed(2)},${g.end.toFixed(2)})'[o${i}]`);
-      prev = `o${i}`;
-    });
-    parts.push(`[${prev}]format=yuv420p[vout]`);
+    const inset = 3 * k;
+    const xRight = (side) => Math.round(W - px(side) - inset - lay.width - lay.width * MARK_ROOM.left);
+    const xLeft = Math.round(px(geo.sideLeft) + inset - lay.width * MARK_ROOM.left);
+    const yTop = Math.round(px(geo.top) - lay.height * MARK_ROOM.y);
+    const yBottom = Math.round(H - px(geo.bottom) - geo.boxH * k - lay.height * MARK_ROOM.y);
+    const yMid = Math.round(H / 2 - lay.height / 2 - lay.height * MARK_ROOM.y);
+    const C = `mod(floor(t/${WM_CYCLE}),${WM_STOPS})`;
+    const filter = [
+      '[1:v]format=rgba[mr]',
+      '[2:v]format=rgba[ml]',
+      `[0:v][mr]overlay=x='if(eq(${C},2),${xRight(geo.sideRightBottom)},${xRight(geo.sideRightTop)})':y='if(eq(${C},0),${yTop},if(eq(${C},2),${yBottom},${yMid}))':eval=frame:shortest=1:enable='eq(mod(${C},2),0)'[o1]`,
+      `[o1][ml]overlay=x=${xLeft}:y='if(eq(${C},1),${yMid},if(eq(${C},3),${yTop},${yBottom}))':eval=frame:shortest=1:enable='eq(mod(${C},2),1)',format=yuv420p[vout]`,
+    ].join(';');
     // about the source's own bitrate, so the file stays as light as the original (Discord takes up to 10 MB)
     const kbps = p.kbps > 300 ? Math.round(p.kbps * 1.15) : 0;
     const args = [
       '-y', '-hide_banner', '-loglevel', 'error', '-progress', 'pipe:1', '-nostats',
       '-i', inPath,
-      '-loop', '1', '-framerate', '30', '-i', rightPath,
-      '-loop', '1', '-framerate', '30', '-i', leftPath,
-      '-filter_complex', parts.join(';'),
+      '-loop', '1', '-framerate', String(MARK_FPS), '-i', path.join(dir, 'r_%04d.png'),
+      '-loop', '1', '-framerate', String(MARK_FPS), '-i', path.join(dir, 'l_%04d.png'),
+      '-filter_complex', filter,
       '-map', '[vout]', '-map', '0:a?',
       '-t', duration.toFixed(3),
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
@@ -162,7 +152,7 @@ export async function watermarkVideo(input, user, aspectHint = '9:16', onProgres
     if (out.length < 1000) throw new Error('empty result');
     return out;
   } finally {
-    for (const f of [inPath, outPath, rightPath, leftPath]) fs.rm(f, { force: true }, () => undefined);
+    fs.rm(dir, { recursive: true, force: true }, () => undefined);
   }
 }
 
